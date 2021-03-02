@@ -1,16 +1,63 @@
-// extern crate sdl2; 
-
-use sdl2::pixels::Color;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
-use std::time::Duration;
+use std::thread::spawn;
+use std::sync::mpsc::*;
 
-// const X:usize = 2560;
-// const Y:usize = 1440;
+struct Pixel {
+    x: u32,
+    y: u32,
+    color: sdl2::pixels::Color
+}
 
+enum Command{
+    Quit,
+    Noop,
+    Resolution(u32, u32)
+}
 
+enum DrawOp{
+    Noop,
+    Draw(Vec<Pixel>)
+}
 
-pub fn main() {
+fn main() {
+    // Main doing dispatching only, all works happens in threads.
+    let (main_command_sender, main_command_queue): (Sender<Command>, Receiver<Command>) = channel();
+    let main_command_sender_for_view = main_command_sender.clone();
+    
+    let (draw_sender, draw_reciever): (Sender<DrawOp>, Receiver<DrawOp>) = channel();
+    let (model_sender, model_reciever): (Sender<Command>, Receiver<Command>) = channel();
+    
+    let model = spawn(move ||{model(main_command_sender, model_reciever)});
+    let view = spawn(move ||{view(main_command_sender_for_view, draw_reciever)});
+    
+    for cmd in main_command_queue.iter() {
+        match cmd {
+            Command::Quit => {
+                println!("Quit command");
+                break
+            },
+            Command::Noop => {},
+            Command::Resolution(x, y) =>{
+                println!("Resolution: {}x{}", x, y);
+                model_sender.send(cmd);
+            }
+        }
+    }
+}
+
+fn model(main_cmd: Sender<Command>, model_cmd: Receiver<Command>){
+    for cmd in model_cmd.iter(){
+        match cmd {
+            Command::Resolution(x, y) =>{
+                println!("Model resolution: {}x{}", x, y);
+            }
+            _ => {},
+        }
+    }
+    
+}
+fn view(main_cmd: Sender<Command>, draw_cmd: Receiver<DrawOp>) {
     // let cpus = num_cpus::get();
     let texture_format = sdl2::pixels::PixelFormatEnum::ABGR8888;
     let pixel_bytes = texture_format.byte_size_per_pixel();
@@ -32,43 +79,32 @@ pub fn main() {
     sdl_context.mouse().show_cursor(false);
     let mut frames:u64 = 0;
     let (X, Y) = canvas.output_size().unwrap();
+    main_cmd.send(Command::Resolution(X, Y)).unwrap();
     let mut event_pump = sdl_context.event_pump().unwrap();
     let texture_creator = canvas.texture_creator();
-    let mut texture1 = texture_creator
+    let mut texture = texture_creator
         .create_texture_streaming(sdl2::pixels::PixelFormatEnum::ABGR8888, X as u32, Y/cpus as u32)
         .unwrap();
-    let mut pixels:Vec<u8> = Vec::new();
-    pixels.resize((X*Y*4) as usize, 0);
+    texture.with_lock(None, |array, _| {for b in array.iter_mut(){*b = 0;}}).unwrap();
     let mut start = std::time::Instant::now();
     let  mut last_printed:u64 = 0;
-    let mut factor:u32 = 0xFEFABABE + frames as u32;
-    'running: loop {
+    loop {
         frames +=1;
-        texture1.with_lock(
-            None,
-            |pixels, _pitch_size|{
-                if frames % 120 == 0 {
-                    for y in 0..Y as usize{
-                        for x in 0..X as usize{
-                            let base = {
-        
-                                if frames & 0x100 == 0{
-                                    frames  as u8
-                                }
-                                else{
-                                    0 - frames as u8
-                                }
-                            };
-                            pixels[(x+y*X as usize) *pixel_bytes] = base;
-                            pixels[(x+y*X as usize) *pixel_bytes+1] = base;
-                            pixels[(x+y*X as usize) *pixel_bytes+2] = base;
-                            pixels[(x+y*X as usize) *pixel_bytes+3] = 255;
+        match draw_cmd.try_recv(){
+            Ok(DrawOp::Draw(pixels)) =>{
+                texture.with_lock(
+                    None,
+                    |bytearray, pitch_size|{
+                        for pixel in  pixels.iter(){
+                            bytearray[pixel.x as usize * pixel_bytes + pixel.y as usize*pitch_size] = pixel.color.r;
+                            bytearray[pixel.x as usize * pixel_bytes + pixel.y as usize*pitch_size + 1] = pixel.color.g;
+                            bytearray[pixel.x as usize * pixel_bytes + pixel.y as usize*pitch_size + 1] = pixel.color.b;
                         }
                     }
-                }
+                ).unwrap();
             }
-        ).unwrap();
-            
+            _ => {}
+        }    
         
         // texture1.update(
         //     None,
@@ -76,13 +112,13 @@ pub fn main() {
         //     X as usize,
         // ).unwrap();
 
-        canvas.copy(&texture1, None, None).unwrap();
+        canvas.copy(&texture, None, None).unwrap();
         
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit {..} |
                 Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
-                    break 'running
+                    main_cmd.send(Command::Quit);
                 },
                 _ => {}
             }
@@ -98,4 +134,5 @@ pub fn main() {
         }
 
     }
+    
 }
