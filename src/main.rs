@@ -12,7 +12,8 @@ struct Pixel {
 enum Command{
     Quit,
     Noop,
-    Resolution(u32, u32)
+    Resolution(u32, u32),
+    Draw(Vec<Pixel>)
 }
 
 enum DrawOp{
@@ -40,23 +41,52 @@ fn main() {
             Command::Noop => {},
             Command::Resolution(x, y) =>{
                 println!("Resolution: {}x{}", x, y);
-                model_sender.send(cmd);
+                model_sender.send(cmd).unwrap();
+            }
+            Command::Draw(cmds) =>{
+                draw_sender.send(DrawOp::Draw(cmds)).unwrap();
             }
         }
     }
 }
 
+const BATCH_SIZE: usize = 65536;
+
+
+
 fn model(main_cmd: Sender<Command>, model_cmd: Receiver<Command>){
-    for cmd in model_cmd.iter(){
-        match cmd {
-            Command::Resolution(x, y) =>{
-                println!("Model resolution: {}x{}", x, y);
-            }
-            _ => {},
+    let mut pixel_width = 0;
+    let mut pixel_height = 0;
+    match model_cmd.recv(){
+        Ok(Command::Resolution(x, y)) => {
+            println!("Starting with resolution: {}x{}", x, y);
+            pixel_width = x;
+            pixel_height = y;
+        },
+        _ => {
+            println!("Unexpected first command");
+            main_cmd.send(Command::Quit).unwrap();
+            return;
         }
     }
-    
+    let mut draw_cmds = Vec::with_capacity(BATCH_SIZE);
+    for x in 0..pixel_width{
+        for y in 0..pixel_height{
+            draw_cmds.push(
+                Pixel{x:x, y:y, color:sdl2::pixels::Color::WHITE}
+            );
+            if draw_cmds.len() >= BATCH_SIZE{
+                main_cmd.send(Command::Draw(draw_cmds));
+                draw_cmds = Vec::with_capacity(BATCH_SIZE);
+            }
+        }
+    }
+    println!("done rendering");
+    loop{model_cmd.recv().unwrap();}
 }
+
+    
+    
 fn view(main_cmd: Sender<Command>, draw_cmd: Receiver<DrawOp>) {
     // let cpus = num_cpus::get();
     let texture_format = sdl2::pixels::PixelFormatEnum::ABGR8888;
@@ -90,8 +120,9 @@ fn view(main_cmd: Sender<Command>, draw_cmd: Receiver<DrawOp>) {
     let  mut last_printed:u64 = 0;
     loop {
         frames +=1;
-        match draw_cmd.try_recv(){
-            Ok(DrawOp::Draw(pixels)) =>{
+        let mut op = 0;
+        while let Ok(DrawOp::Draw(pixels)) = draw_cmd.try_recv(){
+                op += pixels.len();
                 texture.with_lock(
                     None,
                     |bytearray, pitch_size|{
@@ -102,9 +133,8 @@ fn view(main_cmd: Sender<Command>, draw_cmd: Receiver<DrawOp>) {
                         }
                     }
                 ).unwrap();
-            }
-            _ => {}
-        }    
+                println!("frame: {}, {} pixels done", frames, op);
+        }
         
         // texture1.update(
         //     None,
